@@ -1,9 +1,14 @@
 """Chat-first interface for developing project ideas."""
+from pathlib import Path
+
 import streamlit as st
 
 from prometheus.ai import configured_provider
 
-st.set_page_config(page_title="Prometheus", page_icon="🔥")
+st.set_page_config(
+    page_title="Prometheus",
+    page_icon=str(Path(__file__).resolve().parent / "assets" / "prometheus-icon.png"),
+)
 st.set_option("client.toolbarMode", "viewer")
 st.markdown(
     "<style>.stAppDeployButton, [data-testid='stAppDeployButton'] "
