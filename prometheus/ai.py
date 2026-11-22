@@ -10,33 +10,7 @@ from dotenv import dotenv_values
 
 
 class ChatProvider(Protocol):
-    def reply(self, messages: list[dict[str, str]]) -> str: ...
-
-
-SYSTEM_PROMPT = (
-    "You are Prometheus, a conversational partner for developing and prototyping "
-    "project ideas for personal or business use. Respond in English. Keep replies "
-    "very brief, precise and focused on what the user asks, usually 1–3 short "
-    "sentences. Leave the user room to think and respond. State assumptions only "
-    "when they materially affect your advice.\n\n"
-    "The first user message starts the project discussion immediately: use the "
-    "idea they describe; do not ask them to fill in a form or repeat it. Briefly "
-    "acknowledge the idea and ask one simple, targeted question about the most "
-    "important missing point. During brainstorming, clarify the goal, intended "
-    "users, and essential constraints with only a few questions, one per turn. "
-    "Do not repeat answered questions or turn the conversation into a checklist. "
-    "Answer direct questions before asking a follow-up.\n\n"
-    "As the direction becomes clear, suggest suitable approaches, methods and "
-    "materials, with only the essential tradeoffs. Do not assume an AI provider, "
-    "technology, business configuration or project decision has been chosen. "
-    "Clearly distinguish proposals from decisions. Summarize the fundamental "
-    "decisions concisely and ask the user to confirm them in chat before treating "
-    "them as settled. Accept revisions.\n\n"
-    "When useful after confirmation, provide a compact project overview, concept "
-    "map, next steps and resumption summary in chat. Focus only on essential "
-    "decisions and open questions. You currently have no filesystem tools: "
-    "never claim to create, save or update files or to persist the session."
-)
+    def reply(self, messages: list[dict[str, str]], system_prompt: str) -> str: ...
 
 
 class OpenAICompatibleProvider:
@@ -45,12 +19,12 @@ class OpenAICompatibleProvider:
         self.model = model
         self.api_key = api_key
 
-    def reply(self, messages: list[dict[str, str]]) -> str:
+    def reply(self, messages: list[dict[str, str]], system_prompt: str) -> str:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         body = json.dumps({"model": self.model, "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT}, *messages
+            {"role": "system", "content": system_prompt}, *messages
         ]}).encode("utf-8")
         try:
             request = Request(self.endpoint, data=body, headers=headers, method="POST")
@@ -78,11 +52,15 @@ class OpenAICompatibleProvider:
             raise RuntimeError("The AI provider returned an invalid or empty reply. Check that the endpoint supports chat completions.") from exc
 
 
-def configured_provider() -> ChatProvider:
+def local_setting(name: str) -> str:
     settings = dotenv_values(os.path.join(os.path.dirname(__file__), "..", ".env"))
-    endpoint = (os.getenv("PROMETHEUS_AI_ENDPOINT", settings.get("PROMETHEUS_AI_ENDPOINT") or "")).strip()
-    model = (os.getenv("PROMETHEUS_AI_MODEL", settings.get("PROMETHEUS_AI_MODEL") or "")).strip()
-    api_key = (os.getenv("PROMETHEUS_AI_API_KEY", settings.get("PROMETHEUS_AI_API_KEY") or "")).strip()
+    return (os.getenv(name, settings.get(name) or "")).strip()
+
+
+def configured_provider() -> ChatProvider:
+    endpoint = local_setting("PROMETHEUS_AI_ENDPOINT")
+    model = local_setting("PROMETHEUS_AI_MODEL")
+    api_key = local_setting("PROMETHEUS_AI_API_KEY")
     missing = [label for label, value in (
         ("AI endpoint", endpoint), ("model", model), ("API key", api_key)
     ) if not value]

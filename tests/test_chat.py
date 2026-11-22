@@ -1,4 +1,5 @@
 """Exercise the chat UI without a network connection or real credentials."""
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -10,9 +11,18 @@ from streamlit.testing.v1 import AppTest
 APP = Path(__file__).resolve().parents[1] / "app.py"
 
 
+def workflow_reply(message, stage="brainstorming", decisions=None, draft=None):
+    return json.dumps({
+        "message": message, "stage": stage,
+        "memory": {"idea": "A project idea", "confirmed_decisions": decisions or [],
+                   "open_questions": [], "proposed_options": []},
+        "draft": draft,
+    })
+
+
 def test_first_message_starts_chat_and_followup_keeps_context():
     provider = Mock()
-    provider.reply.side_effect = ["Who will use it?", "What should the first prototype do?"]
+    provider.reply.side_effect = [workflow_reply("Who will use it?"), workflow_reply("What should the first prototype do?")]
     with patch("prometheus.ai.configured_provider", return_value=provider):
         app = AppTest.from_file(str(APP)).run()
         assert not app.exception
@@ -29,7 +39,8 @@ def test_first_message_starts_chat_and_followup_keeps_context():
         assert [message.name for message in app.chat_message] == ["user", "assistant"]
         provider.reply.assert_called_once_with([
             {"role": "user", "content": "A tool for sharing project ideas"},
-        ])
+        ], provider.reply.call_args.args[1])
+        assert "Current stage: brainstorming" in provider.reply.call_args.args[1]
 
         app.chat_input[0].set_value("My colleagues").run()
         assert not app.exception
@@ -76,7 +87,7 @@ def test_missing_configuration_is_reported_in_chat_and_message_is_kept(monkeypat
         assert len(app.error) == 3
 
     provider = Mock()
-    provider.reply.return_value = "Who would participate?"
+    provider.reply.return_value = workflow_reply("Who would participate?")
     with patch("prometheus.ai.configured_provider", return_value=provider):
         app.run()
         assert not app.exception
@@ -92,7 +103,7 @@ def test_missing_configuration_is_reported_in_chat_and_message_is_kept(monkeypat
 
 def test_failed_response_can_be_retried_without_duplicate_messages():
     provider = Mock()
-    provider.reply.side_effect = [RuntimeError("Unable to connect."), "Who is it for?"]
+    provider.reply.side_effect = [RuntimeError("Unable to connect."), workflow_reply("Who is it for?")]
     with patch("prometheus.ai.configured_provider", return_value=provider):
         app = AppTest.from_file(str(APP)).run()
         app.chat_input[0].set_value("A learning app").run()
@@ -125,3 +136,34 @@ def test_different_failures_stay_in_order_across_new_messages_and_reruns():
             {"role": "user", "content": "First idea"},
             {"role": "user", "content": "A clarification"},
         ]
+
+
+def test_document_draft_requires_chat_confirmation_and_configured_directory(tmp_path):
+    draft = {"name": "Garden", "overview": "A shared garden", "concept_map": "People -> plots",
+             "next_steps": "Find a site", "context": "Confirmed: local pilot"}
+    provider = Mock()
+    provider.reply.return_value = workflow_reply("Save these decisions?", "documentation", ["Local pilot"], draft)
+    with patch("prometheus.ai.configured_provider", return_value=provider), \
+         patch("prometheus.ai.local_setting", return_value="") as setting:
+        app = AppTest.from_file(str(APP)).run()
+        app.chat_input[0].set_value("A shared community garden").run()
+        assert app.session_state["workflow"].stage == "documentation"
+        assert not list(tmp_path.iterdir())
+        app.chat_input[0].set_value("Yes").run()
+        assert "not saved" in app.chat_message[-1].error[0].value
+        assert provider.reply.call_count == 1
+        setting.assert_called_with("PROMETHEUS_PROJECTS_DIR")
+
+    with patch("prometheus.ai.configured_provider", return_value=provider), \
+         patch("prometheus.ai.local_setting", return_value=str(tmp_path)):
+        app.chat_input[0].set_value("Yes, save it").run()
+        assert not app.exception
+        assert (tmp_path / "garden" / "project.md").exists()
+        assert (tmp_path / "garden" / "context.md").read_text().endswith("Confirmed: local pilot\n")
+        assert provider.reply.call_count == 1
+        revised = dict(draft, overview="A revised garden")
+        provider.reply.return_value = workflow_reply("Save this revision?", "documentation", ["Local pilot"], revised)
+        app.chat_input[0].set_value("Change the overview").run()
+        assert (tmp_path / "garden" / "project.md").read_text().endswith("A shared garden\n")
+        app.chat_input[0].set_value("Yes, save it").run()
+        assert (tmp_path / "garden" / "project.md").read_text().endswith("A revised garden\n")

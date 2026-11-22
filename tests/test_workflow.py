@@ -6,7 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from prometheus.ai import OpenAICompatibleProvider, configured_provider
-from prometheus.storage import save_project
+from prometheus.storage import save_project, update_project
+from prometheus.workflow import WorkflowState, apply_response, is_save_confirmation, system_prompt
 
 
 def test_save_confirmed_project_without_overwriting(tmp_path):
@@ -17,6 +18,14 @@ def test_save_confirmed_project_without_overwriting(tmp_path):
     assert (directory / "context.md").read_text() == "# Context\n\nContext\n"
     with pytest.raises(FileExistsError):
         save_project(tmp_path, "My idea", "Another idea")
+    update_project(directory, "My idea", "Revised overview", "New map", "New step", "New context")
+    assert (directory / "project.md").read_text().endswith("Revised overview\n")
+    assert (directory / "context.md").read_text().endswith("New context\n")
+
+
+def test_update_rejects_unrecognized_directory(tmp_path):
+    with pytest.raises(ValueError, match="missing"):
+        update_project(tmp_path, "Idea", "Overview")
 
 
 def test_missing_settings_are_reported(monkeypatch):
@@ -69,7 +78,7 @@ def test_invalid_endpoint_is_reported(monkeypatch):
 def test_provider_failures_explain_the_issue_without_leaking_details(error, message):
     with patch("prometheus.ai.urlopen", side_effect=error):
         with pytest.raises(RuntimeError, match=message) as caught:
-            OpenAICompatibleProvider("https://example.com/chat", "model", "secret").reply([])
+            OpenAICompatibleProvider("https://example.com/chat", "model", "secret").reply([], "Instructions")
     assert "private" not in str(caught.value)
     assert "secret" not in str(caught.value)
 
@@ -79,7 +88,7 @@ def test_provider_failures_explain_the_issue_without_leaking_details(error, mess
 def test_invalid_model_response_is_reported(body):
     with patch("prometheus.ai.urlopen", return_value=BytesIO(body)):
         with pytest.raises(RuntimeError, match="invalid or empty reply"):
-            OpenAICompatibleProvider("https://example.com/chat", "model", "secret").reply([])
+            OpenAICompatibleProvider("https://example.com/chat", "model", "secret").reply([], "Instructions")
 
 
 def test_provider_sends_conversation_and_reads_response():
@@ -95,9 +104,41 @@ def test_provider_sends_conversation_and_reads_response():
 
     with patch("prometheus.ai.urlopen", return_value=Response()) as open_url:
         result = OpenAICompatibleProvider("https://example.com/chat", "model", "secret").reply(
-            [{"role": "user", "content": "An idea"}]
+            [{"role": "user", "content": "An idea"}], "Instructions"
         )
     request = open_url.call_args.args[0]
+    assert json.loads(request.data)["messages"][0]["content"] == "Instructions"
     assert json.loads(request.data)["messages"][-1]["content"] == "An idea"
     assert request.get_header("Authorization") == "Bearer secret"
     assert result == "Who is it for?"
+
+
+def response(message, stage, decisions=(), draft=None):
+    return json.dumps({"message": message, "stage": stage, "memory": {
+        "idea": "A small project", "confirmed_decisions": list(decisions),
+        "open_questions": [], "proposed_options": []}, "draft": draft})
+
+
+def test_stage_can_skip_brainstorming_and_step_back():
+    state = WorkflowState()
+    assert apply_response(state, response("Try a prototype.", "consulting")) == "Try a prototype."
+    assert state.stage == "consulting"
+    assert "Current stage: consulting" in system_prompt(state)
+    apply_response(state, response("Who is the user?", "brainstorming"))
+    assert state.stage == "brainstorming"
+    apply_response(state, response("Ready to document?", "documentation", ["Use a local prototype"]))
+    assert state.stage == "documentation"
+
+
+def test_invalid_stage_or_unconfirmed_documentation_does_not_change_memory():
+    state = WorkflowState()
+    for raw in ("not json", response("Ready?", "documentation"), response("Hi", "unknown")):
+        with pytest.raises(RuntimeError, match="invalid workflow response"):
+            apply_response(state, raw)
+        assert state.stage == "brainstorming"
+        assert not state.memory.idea
+
+
+def test_save_confirmation_is_unambiguous():
+    assert is_save_confirmation("Yes, save it!")
+    assert not is_save_confirmation("Yes, but change the scope")
